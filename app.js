@@ -421,7 +421,7 @@ function staffView(tok) {
     });
     const on = (id, fn) => { const x = document.getElementById(id); if (x) x.onclick = fn; };
     on('openr', async () => { const t = await ask({ title: 'סבב חדש', label: 'שם לסבב, או להשאיר ריק', confirmText: 'פתיחה', placeholder: 'למשל: סבב בוקר' }); if (t === null) return; act(() => rpc('staff_round_open', { p_token: tok, p_title: t }), 'הסבב נפתח'); });
-    on('close', async () => { if (await ask({ title: 'סגירת הסבב', label: 'אחרי הסגירה תושבים לא יוכלו לענות על הסבב הזה.', confirmText: 'סגירת הסבב', danger: true, input: false })) act(() => rpc('staff_round_close', { p_token: tok }), 'הסבב נסגר'); });
+    on('close', async () => { if (await ask({ title: 'סגירת הסבב', label: `הכל יתאפס לקראת הסבב הבא: תושבים לא יוכלו לענות יותר על הסבב הזה${st.d.cases.length ? `, ו־${st.d.cases.length} בקשות עזרה פתוחות ייסגרו` : ''}. התשובות נשמרות בהיסטוריה.`, confirmText: 'סגירת הסבב', danger: true, input: false })) act(() => rpc('staff_round_close', { p_token: tok }), 'הסבב נסגר'); });
     on('sendall', openSendAll);
   }
 
