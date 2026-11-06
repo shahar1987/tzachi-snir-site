@@ -14,7 +14,7 @@ const ROLES = { admin: 'מנהל', coordinator: 'רכז', shelter_manager: 'אח
 const ERRORS = {
   not_authorized: 'הקישור לא תקף. בקשו קישור חדש מצוות צח״י.', no_open_round: 'אין כרגע סבב פעיל.',
   forbidden: 'אין הרשאה לפעולה הזו.', note_required: 'צריך לכתוב מה נעשה.', round_already_open: 'כבר יש סבב פתוח.',
-  cannot_revoke_self: 'אי אפשר להסיר את עצמך.'
+  cannot_revoke_self: 'אי אפשר להסיר את עצמך.', bad_answer: 'אחת התשובות לא תקינה.', bad_form: 'הטופס לא תקין.'
 };
 
 const ICON = {
@@ -95,19 +95,20 @@ async function rpc(fn, args = {}) {
 }
 
 function waLink(phone, text) {
-  const intl = phone && phone.startsWith('0') ? '972' + phone.slice(1) : (phone || '').replace('+', '');
+  const d = String(phone || '').replace(/\D/g, ''), intl = d.startsWith('0') ? '972' + d.slice(1) : d;
   return `https://wa.me/${intl}?text=${encodeURIComponent(text)}`;
 }
 const linkFor = (kind, tok) => `${location.origin}${location.pathname}#${kind}=${tok}`;
 
 // ---------- sheets: drag to dismiss with momentum, interruptible open/close ----------
 const sheets = [];
+let afterSheets = null; // redraw deferred while a sheet is open, run when the last one closes
 function openSheet({ title, html, left, right, onMount }) {
   const scrim = document.createElement('div'); scrim.className = 'scrim';
   const el = document.createElement('section');
   el.className = 'sheet'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', title || '');
   el.innerHTML = `<div class="grab" aria-hidden="true"><i></i></div>
-    <div class="bar">${left ? `<button class="link" data-left>${left}</button>` : right ? '<button class="link" data-close>סגירה</button>' : '<span style="min-width:64px"></span>'}<h2>${esc(title || '')}</h2>
+    <div class="bar">${left ? `<button class="link" data-left>${left}</button>` : right ? '<button class="link" data-close>ביטול</button>' : '<span style="min-width:64px"></span>'}<h2>${esc(title || '')}</h2>
     ${right ? `<button class="link strong" data-right>${right}</button>` : '<button class="link" data-close>סגירה</button>'}</div><div class="body">${html}</div>`;
   document.body.append(scrim, el);
   const desktop = matchMedia('(min-width: 900px)').matches;
@@ -119,7 +120,8 @@ function openSheet({ title, html, left, right, onMount }) {
     else { el.style.transform = `translateY(${Math.max(v, 0) + (v < 0 ? rubber(v, h()) - v : 0)}px)`; scrim.style.opacity = Math.max(0, 1 - v / h()); }
   };
   const settle = (to, velocity = 0, damping = 0.86) => { anim?.stop(); anim = spring({ from: y, to, velocity, damping, response: desktop ? 0.3 : 0.38, onUpdate: paint, onDone: () => to !== 0 && remove() }); };
-  const remove = () => { el.remove(); scrim.remove(); sheets.splice(sheets.indexOf(api), 1); api.onClose?.(); };
+  const remove = () => { el.remove(); scrim.remove(); sheets.splice(sheets.indexOf(api), 1); api.onClose?.();
+    if (!sheets.length && afterSheets) { const f = afterSheets; afterSheets = null; f(); } };
   const close = (velocity = 0) => { if (closing) return; closing = true; settle(desktop ? 1 : h(), velocity, 1); };
   paint(desktop ? 1 : h()); settle(0, 0, desktop ? 1 : 0.86);
 
@@ -150,13 +152,13 @@ function openSheet({ title, html, left, right, onMount }) {
   el.querySelector('[data-close]')?.addEventListener('click', () => close());
   sheets.push(api);
   onMount?.(api);
-  setTimeout(() => el.querySelector('.body button, .body a, .body input, [data-close]')?.focus({ preventScroll: true }), 50);
+  setTimeout(() => (el.querySelector('.body textarea') || el.querySelector('.body button, .body a, .body input, [data-close]'))?.focus({ preventScroll: true }), 50);
   return api;
 }
 addEventListener('keydown', e => { if (e.key === 'Escape' && sheets.length) sheets[sheets.length - 1].close(); });
 
 // Promise-based replacements for prompt()/confirm(), shown as sheets.
-function ask({ title, label, confirmText = 'שמירה', danger, input = true, placeholder = '' }) {
+function ask({ title, label, confirmText = 'שמירה', danger, input = true, placeholder = '', required = false }) {
   return new Promise(resolve => {
     let done = false;
     const s = openSheet({ title, right: confirmText,
@@ -164,7 +166,9 @@ function ask({ title, label, confirmText = 'שמירה', danger, input = true, p
         ${input ? `<textarea class="field" id="ask" placeholder="${esc(placeholder)}" maxlength="1000"></textarea>` : ''}
         ${danger ? `<button class="btn block fill danger" style="margin-top:12px" data-ok>${esc(confirmText)}</button>` : ''}`,
       onMount(api) {
-        const ok = () => { done = true; resolve(input ? api.el.querySelector('#ask').value : true); api.close(); };
+        const ok = () => {
+          if (required && !api.el.querySelector('#ask').value.trim()) { toast('צריך לכתוב כאן משהו'); api.el.querySelector('#ask').focus(); return; }
+          done = true; resolve(input ? api.el.querySelector('#ask').value : true); api.close(); };
         api.el.querySelector('[data-right]').onclick = ok;
         api.el.querySelector('[data-ok]')?.addEventListener('click', ok);
         api.onClose = () => { if (!done) resolve(null); };
@@ -192,74 +196,119 @@ function segmented(container, options, value, onChange) {
 
 // ---------- Resident ----------
 
-function residentView(tok) {
-  let data, ans = {}, editing = false, forHousehold = true;
+const DEFAULT_FORM = { builtins: { location: true, shelter: true, household: true, wellbeing: true, help: true }, questions: [] };
+
+// preview: staff see the exact resident form with their current settings; nothing is sent.
+function residentView(tok, preview) {
+  let data, ans = {}, editing = false, forHousehold = true, sending = false, failed = '';
   $app.className = 'resident';
 
   async function load() {
-    try { data = await rpc('resident_get', { p_token: tok }); }
-    catch (e) { $app.innerHTML = `<div class="done"><h1>צח״י שניר</h1><p class="err">${esc(e.message)}</p></div>`; return; }
-    ans = data.answer ? { ...data.answer } : {};
+    if (preview) data = { first_name: 'ישראל', household: ['שרה'], round: { id: 'p', title: 'תצוגה מקדימה' }, answer: null, form: preview };
+    else {
+      try { data = await rpc('resident_get', { p_token: tok }); }
+      catch (e) { $app.innerHTML = `<div class="done"><h1>צח״י שניר</h1><p class="sub">${esc(e.message)}</p></div>`; return; }
+    }
+    ans = data.answer ? { ...data.answer, extra: { ...(data.answer.extra || {}) } } : { extra: {} };
     editing = !data.answer;
     render();
   }
-  const choice = (field, value, label) => `<button type="button" class="choice" data-f="${field}" data-v="${value}" aria-pressed="${String(ans[field]) === String(value)}">${label}</button>`;
+  const form = () => ({ ...DEFAULT_FORM, ...(data.form || {}), builtins: { ...DEFAULT_FORM.builtins, ...(data.form?.builtins || {}) } });
+  const choice = (field, value, label, cls = '') => `<button type="button" class="choice ${cls}" data-f="${field}" data-v="${esc(value)}" aria-pressed="${String(field.startsWith('x:') ? ans.extra[field.slice(2)] : ans[field]) === String(value)}">${label}</button>`;
+  const needsHelp = a => a && ((a.help_type && a.help_type !== 'none') || a.shelter_status === 'difficulty_reaching');
 
-  function render() {
-    const hh = data.household || [];
+  function render(focusKey) {
+    const hh = data.household || [], f = form(), b = f.builtins;
     if (!data.round) { $app.innerHTML = `<h1>שלום ${esc(data.first_name)}</h1><p class="sub">אין כרגע סבב פעיל. כשייפתח סבב, אותו קישור יעבוד.</p>`; return; }
     if (!editing) {
+      const urgent = needsHelp(data.answer);
       $app.innerHTML = `<div class="done page"><div class="mark"><svg viewBox="0 0 24 24">${ICON.check}</svg></div>
-        <h1>תודה ${esc(data.first_name)}</h1><p class="sub">העדכון התקבל${data.answer?.submitted_at ? ' ב-' + esc(time(data.answer.submitted_at)) : ''}. יחד נעבור את זה.</p>
+        <h1 tabindex="-1" id="thanks">תודה ${esc(data.first_name)}</h1>
+        <p class="sub">${urgent ? 'קיבלנו. צוות צח״י יחזור אליכם בהקדם.' : 'העדכון התקבל. יחד נעבור את זה.'}</p>
         <button class="btn" id="edit">עדכון התשובה</button></div>`;
       document.getElementById('edit').onclick = () => { editing = true; render(); };
+      document.getElementById('thanks').focus();
       return;
     }
-    const inKibbutz = ans.location === 'kibbutz';
+    const inKibbutz = !b.location || ans.location === 'kibbutz';
+    const q = (id, text) => `<div class="q" id="${id}">${text}</div>`;
     $app.innerHTML = `<div class="page">
+      ${preview ? '<p class="preview-tag">תצוגה מקדימה · שום דבר לא נשלח</p>' : ''}
       <h1>שלום ${esc(data.first_name)}</h1><p class="sub">${esc(data.round.title)}</p>
-      <button class="cta" id="quick">${hh.length ? 'כולנו בסדר, בבית עם ממ״ד' : 'אני בסדר, בבית עם ממ״ד'}</button>
-      <div class="group-title">או לעדכן בפירוט</div>
+      ${(f.questions || []).some(x => x.required) ? '' : `<button class="cta" id="quick">${hh.length && forHousehold ? 'כולנו בסדר, בבית עם ממ״ד' : 'אני בסדר, בבית עם ממ״ד'}</button>
+      <p class="or">או לעדכן בפירוט</p>`}
       <form id="f" novalidate>
-        <div class="group-title" id="l-loc">איפה את/ה עכשיו?</div>
-        <div class="choices two" role="group" aria-labelledby="l-loc">${Object.entries(LOC).map(([k, v]) => choice('location', k, v)).join('')}</div>
-        ${ans.location === 'other' ? `<input class="field" id="loc_other" aria-label="איפה" placeholder="איפה" value="${esc(ans.location_other)}" maxlength="200" style="margin-top:8px">` : ''}
-        ${inKibbutz ? `<div class="group-title" id="l-sh">מיגון</div>
-          <div class="choices" role="group" aria-labelledby="l-sh">${Object.entries(SHEL).map(([k, v]) => choice('shelter_status', k, v)).join('')}</div>
-          <div class="group-title"><label for="hc">כמה נפשות בבית עכשיו, כולל אורחים</label></div>
-          <input class="field" id="hc" type="number" inputmode="numeric" min="0" max="40" value="${esc(ans.household_count)}">` : ''}
-        <div class="group-title" id="l-mood">איך את/ה מרגיש/ה?</div>
-        <div class="choices five" role="group" aria-labelledby="l-mood">${MOODS.map(([e, l], i) => choice('wellbeing', i + 1, `<span class="emo" aria-hidden="true">${e}</span><small>${l}</small>`)).join('')}</div>
-        <div class="group-title" id="l-help">צריכים משהו?</div>
-        <div class="choices two" role="group" aria-labelledby="l-help">${Object.entries(HELP).map(([k, v]) => choice('help_type', k, v)).join('')}</div>
-        ${ans.help_type && ans.help_type !== 'none' ? `<div class="group-title"><label for="hn">במה נוכל לעזור?</label></div><textarea class="field" id="hn" maxlength="1000">${esc(ans.help_note)}</textarea>` : ''}
-        ${hh.length ? `<label class="check-cell"><input type="checkbox" id="fh" ${forHousehold ? 'checked' : ''}> לעדכן גם עבור ${esc(hh.join(', '))}</label>` : ''}
-        <p class="err" id="ferr" role="alert"></p>
-        <button class="btn fill block" type="submit">שליחה</button>
+        ${b.location ? `${q('l-loc', 'איפה את/ה עכשיו?')}
+          <div class="choices two" role="group" aria-labelledby="l-loc">${Object.entries(LOC).map(([k, v]) => choice('location', k, v)).join('')}</div>
+          ${ans.location === 'other' ? `<label class="q" for="loc_other">איפה?</label><input class="field" id="loc_other" value="${esc(ans.location_other)}" maxlength="200">` : ''}` : ''}
+        ${inKibbutz && b.shelter ? `${q('l-sh', 'מיגון')}
+          <div class="choices" role="group" aria-labelledby="l-sh">${Object.entries(SHEL).map(([k, v]) => choice('shelter_status', k, v, k === 'difficulty_reaching' ? 'urgent' : '')).join('')}</div>` : ''}
+        ${inKibbutz && b.household ? `<label class="q" for="hc">כמה נפשות בבית עכשיו, כולל אורחים</label>
+          <input class="field" id="hc" type="number" inputmode="numeric" min="0" max="40" step="1" value="${esc(ans.household_count)}">` : ''}
+        ${b.wellbeing ? `${q('l-mood', 'איך את/ה מרגיש/ה?')}
+          <div class="choices five" role="group" aria-labelledby="l-mood">${MOODS.map(([e, l], i) => choice('wellbeing', i + 1, `<span class="emo" aria-hidden="true">${e}</span><small>${l}</small>`)).join('')}</div>` : ''}
+        ${b.help ? `${q('l-help', 'צריכים משהו?')}
+          <div class="choices two" role="group" aria-labelledby="l-help">${Object.entries(HELP).map(([k, v]) => choice('help_type', k, v, k === 'none' ? '' : 'urgent')).join('')}</div>
+          ${ans.help_type && ans.help_type !== 'none' ? `<label class="q" for="hn">במה נוכל לעזור?</label><textarea class="field" id="hn" maxlength="1000">${esc(ans.help_note)}</textarea>` : ''}` : ''}
+        ${(f.questions || []).map((x, i) => {
+          const id = 'xq' + i, lab = esc(x.label) + (x.required ? ' <span aria-hidden="true">*</span>' : '');
+          if (x.type === 'text') return `<label class="q" for="${id}">${lab}</label><input class="field" id="${id}" data-x="${esc(x.id)}" maxlength="300" value="${esc(ans.extra[x.id])}">`;
+          const opts = x.type === 'yesno' ? ['כן', 'לא'] : (x.options || []);
+          return `${q(id, lab)}<div class="choices ${opts.length === 2 ? 'two' : ''}" role="group" aria-labelledby="${id}">${opts.map(o => choice('x:' + x.id, o, esc(o))).join('')}</div>`;
+        }).join('')}
+        ${hh.length ? `<label class="check-cell"><input type="checkbox" id="fh" ${forHousehold ? 'checked' : ''}><span>לעדכן גם עבור ${esc(hh.join(', '))}<small>מיקום ומיגון בלבד. בקשת עזרה נשלחת רק בשמך.</small></span></label>` : ''}
+        <p class="err" id="ferr" role="alert">${esc(failed)}</p>
+        <button class="btn fill block" type="submit" ${sending ? 'disabled' : ''}>${sending ? 'שולח…' : 'שליחה'}</button>
+        ${data.answer ? '<button type="button" class="btn block" id="cancel" style="margin-top:10px">ביטול</button>' : ''}
       </form></div>`;
-    $app.querySelectorAll('.choice').forEach(b => b.onclick = () => {
-      keepInputs(); ans[b.dataset.f] = b.dataset.f === 'wellbeing' ? Number(b.dataset.v) : b.dataset.v;
-      const y = scrollY; render(); $app.querySelector('.page').style.animation = 'none'; scrollTo(0, y);
+    $app.querySelectorAll('.choice').forEach(btn => btn.onclick = () => {
+      keepInputs();
+      const fld = btn.dataset.f, v = fld === 'wellbeing' ? Number(btn.dataset.v) : btn.dataset.v;
+      if (fld.startsWith('x:')) ans.extra[fld.slice(2)] = v; else ans[fld] = v;
+      failed = '';
+      const y = scrollY; render(fld + '|' + btn.dataset.v); $app.querySelector('.page').style.animation = 'none'; scrollTo(0, y);
     });
-    document.getElementById('quick').onclick = () => send({ location: 'kibbutz', shelter_status: 'protected_room', help_type: 'none' });
+    // Keep keyboard focus on the choice that was just pressed.
+    if (focusKey) { const [fld, v] = focusKey.split('|'); [...$app.querySelectorAll('.choice')].find(x => x.dataset.f === fld && x.dataset.v === v)?.focus({ preventScroll: true }); }
+    document.getElementById('fh')?.addEventListener('change', e => { keepInputs(); render(); });
+    document.getElementById('cancel')?.addEventListener('click', () => { editing = false; failed = ''; ans = { ...data.answer, extra: { ...(data.answer.extra || {}) } }; render(); });
+    const quick = document.getElementById('quick'); if (quick) quick.onclick = () => send({ location: 'kibbutz', shelter_status: 'protected_room', help_type: 'none' });
     document.getElementById('f').onsubmit = e => {
       e.preventDefault(); keepInputs();
-      if (!ans.location || !ans.help_type) { document.getElementById('ferr').textContent = 'צריך לבחור איפה את/ה ואם צריך משהו.'; return; }
+      const missing = [];
+      if (b.location && !ans.location) missing.push(['l-loc', 'איפה את/ה']);
+      if (b.location && ans.location === 'other' && !(ans.location_other || '').trim()) missing.push(['loc_other', 'איפה בדיוק']);
+      if (inKibbutz && b.shelter && !ans.shelter_status) missing.push(['l-sh', 'מיגון']);
+      if (b.help && !ans.help_type) missing.push(['l-help', 'אם צריך משהו']);
+      (f.questions || []).forEach((x, i) => { if (x.required && !String(ans.extra[x.id] ?? '').trim()) missing.push(['xq' + i, x.label]); });
+      if (missing.length) {
+        failed = 'חסר: ' + missing.map(m => m[1]).join(', ');
+        document.getElementById('ferr').textContent = failed;
+        document.getElementById(missing[0][0])?.scrollIntoView({ behavior: reduced() ? 'auto' : 'smooth', block: 'center' });
+        return;
+      }
       send(ans);
     };
   }
   function keepInputs() {
     const v = id => document.getElementById(id);
     if (v('loc_other')) ans.location_other = v('loc_other').value;
-    if (v('hc')) ans.household_count = v('hc').value === '' ? null : Number(v('hc').value);
+    if (v('hc')) { const n = parseInt(v('hc').value, 10); ans.household_count = Number.isFinite(n) && n >= 0 && n <= 40 ? n : null; }
     if (v('hn')) ans.help_note = v('hn').value;
     if (v('fh')) forHousehold = v('fh').checked;
+    $app.querySelectorAll('[data-x]').forEach(i => { ans.extra[i.dataset.x] = i.value; });
   }
   async function send(payload) {
-    const p = { ...payload, for_household: forHousehold && (data.household || []).length > 0 };
-    if (p.location !== 'kibbutz') { delete p.shelter_status; delete p.household_count; }
-    try { $app.querySelectorAll('button').forEach(b => b.disabled = true); await rpc('resident_submit', { p_token: tok, p }); await load(); }
-    catch (e) { toast(e.message); render(); }
+    if (sending) return;
+    const allowed = ['location', 'location_other', 'shelter_status', 'household_count', 'wellbeing', 'help_type', 'help_note', 'extra'];
+    const p = Object.fromEntries(Object.entries(payload).filter(([k, v]) => allowed.includes(k) && v !== null && v !== undefined && v !== ''));
+    p.for_household = forHousehold && (data.household || []).length > 0;
+    if (p.location && p.location !== 'kibbutz') { delete p.shelter_status; delete p.household_count; }
+    if (p.help_type === 'none') delete p.help_note;
+    if (preview) { toast('תצוגה מקדימה: התשובה לא נשלחה'); return; }
+    sending = true; failed = ''; render();
+    try { await rpc('resident_submit', { p_token: tok, p }); sending = false; await load(); }
+    catch (e) { sending = false; failed = e.message + ' התשובה לא נשלחה, אפשר לנסות שוב.'; render(); document.getElementById('ferr')?.scrollIntoView({ block: 'center' }); }
   }
   load();
 }
@@ -282,10 +331,11 @@ function staffView(tok) {
       if (e.message === ERRORS.not_authorized) { try { localStorage.removeItem(STAFF_KEY); } catch (_) { /* storage blocked */ } }
       return false;
     }
-    if (!document.querySelector('.shell')) shell(); else if (!sheets.length) page(false);
+    if (!document.querySelector('.shell')) shell(); else if (!sheets.length) page(false); else afterSheets = () => page(false);
     return true;
   }
-  setInterval(() => { if (document.visibilityState === 'visible' && !sheets.length) load(true); }, 20000);
+  // Skip while a sheet is open or the user is typing (a redraw would steal focus from the search box).
+  setInterval(() => { if (document.visibilityState === 'visible' && !sheets.length && !document.activeElement?.matches('input, textarea, select')) load(true); }, 20000);
 
   function shell() {
     $app.className = '';
@@ -366,7 +416,7 @@ function staffView(tok) {
     el.querySelectorAll('.stat').forEach(b => b.onclick = () => { st.filter = st.filter === b.dataset.s ? null : b.dataset.s; page(false); });
     el.querySelectorAll('[data-assign]').forEach(b => b.onclick = () => act(() => rpc('staff_case_update', { p_token: tok, p_case: b.dataset.assign, p_status: 'assigned', p_note: null }), 'סומן שאת/ה מטפל/ת'));
     el.querySelectorAll('[data-resolve]').forEach(b => b.onclick = async () => {
-      const note = await ask({ title: 'סגירת בקשה', label: 'מה נעשה?', confirmText: 'סגירה' }); if (note === null) return;
+      const note = await ask({ title: 'סגירת בקשה', label: 'מה נעשה?', confirmText: 'סיום טיפול', required: true }); if (note === null) return;
       act(() => rpc('staff_case_update', { p_token: tok, p_case: b.dataset.resolve, p_status: 'resolved', p_note: note }), 'הבקשה נסגרה');
     });
     const on = (id, fn) => { const x = document.getElementById(id); if (x) x.onclick = fn; };
@@ -394,10 +444,11 @@ function staffView(tok) {
     };
     let groups;
     if (st.mapMode === 'mamad') {
-      if (!d.round) { el.innerHTML = '<div class="group"><div class="empty">החלוקה לפי מיגון מתמלאת מהתשובות בסבב פעיל.</div></div>'; return; }
-      const by = k => d.people.filter(p => k === 'none' ? !p.answer || !p.answer.shelter_status : p.answer?.shelter_status === k);
-      groups = [['protected_room', 'בממ״ד בבית', null, by('protected_room')], ['going_to_shelter', 'הולכים למקלט', null, by('going_to_shelter')],
-        ['difficulty_reaching', 'מתקשים להגיע למקלט', null, by('difficulty_reaching')], ['none', 'עוד לא ידוע', 'לא ענו או מחוץ ליישוב', by('none')]];
+      // Live answer wins; otherwise what the registry knows about the home.
+      const kind = p => (d.round && p.answer?.shelter_status) || (p.has_mamad === true ? 'protected_room' : p.has_mamad === false ? 'going_to_shelter' : 'none');
+      const by = k => d.people.filter(p => kind(p) === k);
+      groups = [['protected_room', 'יש ממ״ד בבית', null, by('protected_room')], ['going_to_shelter', 'אין ממ״ד', 'משתמשים במקלט', by('going_to_shelter')],
+        ...(d.round ? [['difficulty_reaching', 'מתקשים להגיע למקלט', null, by('difficulty_reaching')]] : []), ['none', 'לא ידוע', 'אפשר לעדכן בכרטיס התושב', by('none')]];
     } else {
       groups = d.shelters.filter(s => s.kind === st.mapMode).map(s => [s.id, s.name, s.manager ? 'אחראי: ' + s.manager : null, d.people.filter(p => p.shelter_id === s.id)]);
       if (st.mapMode === 'shelter') { const un = d.people.filter(p => !p.shelter_id); if (un.length) groups.push(['-', 'ללא שיבוץ', null, un]); }
@@ -411,8 +462,12 @@ function staffView(tok) {
     const sorted = ppl.slice().sort((a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status) || fullName(a).localeCompare(fullName(b), 'he'));
     const shelter = st.d.shelters.find(s => s.id === key);
     openSheet({ title: name, left: shelter ? 'הדפסה' : null,
-      html: `<p class="muted center" style="margin:0 0 10px">${ppl.length} תושבים</p><div class="group">${sorted.map(personCell).join('') || '<div class="empty">אין תושבים</div>'}</div>`,
-      onMount(s) { bindPeople(s.el); s.el.querySelector('[data-left]')?.addEventListener('click', () => printLists([shelter])); } });
+      html: `<p class="muted center" style="margin:0 0 10px">${ppl.length} תושבים</p><div class="group">${sorted.map(personCell).join('') || '<div class="empty">אין תושבים</div>'}</div>
+        ${can() && (shelter || key === '-') ? `<div style="margin-top:14px"><button class="btn block" data-addhere>הוספת תושב/ת ${shelter ? 'לכאן' : ''}</button></div>` : ''}`,
+      onMount(s) {
+        bindPeople(s.el); s.el.querySelector('[data-left]')?.addEventListener('click', () => printLists([shelter]));
+        s.el.querySelector('[data-addhere]')?.addEventListener('click', () => { s.close(); editPerson(null, { shelter_id: shelter?.id || '' }); });
+      } });
   }
 
   // Paper fallback: one page per shelter with names, phones and an empty column to tick by hand.
@@ -448,13 +503,61 @@ function staffView(tok) {
 
   async function viewRounds() {
     const el = document.getElementById('tab');
-    el.innerHTML = '<div class="group"><div class="empty">טוען…</div></div>';
+    if (!el.children.length) el.innerHTML = '<div class="group"><div class="empty">טוען…</div></div>';
     try {
       const h = await rpc('staff_history', { p_token: tok });
-      el.innerHTML = `<div class="group stagger">${h.map((r, i) => `<div class="cell plain" style="--i:${i};cursor:default"><span class="grow"><span class="t">${esc(r.title)}</span>
+      const f = st.d.form || DEFAULT_FORM, on = Object.values({ ...DEFAULT_FORM.builtins, ...f.builtins }).filter(Boolean).length;
+      el.innerHTML = `<div class="hero" style="margin-bottom:6px"><div class="grow"><h2>הטופס לתושבים</h2>
+          <div class="muted">${on} שאלות קבועות${(f.questions || []).length ? ` ועוד ${f.questions.length} שאלות שהוספת` : ''}</div>
+          <div class="row-actions" style="margin-top:12px"><button class="btn sm fill" id="editform">עריכת הטופס</button><button class="btn sm" id="previewform">איך התושב רואה אותו</button></div></div></div>
+        <div class="group-title">סבבים</div><div class="group stagger">${h.map((r, i) => `<div class="cell plain" style="--i:${i};cursor:default"><span class="grow"><span class="t">${esc(r.title)}</span>
         <span class="s" style="display:block">${esc(time(r.opened_at))}${r.closed_at ? ' עד ' + esc(time(r.closed_at)) : ' · פתוח'}</span></span>
         <span class="badge b-safe">${r.answered} ענו</span>${r.needed_help ? `<span class="badge b-needs_help">${r.needed_help} עזרה</span>` : ''}</div>`).join('')}</div>`;
+      document.getElementById('editform').onclick = editForm;
+      document.getElementById('previewform').onclick = () => previewForm(st.d.form || DEFAULT_FORM);
     } catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  }
+
+  function previewForm(cfg) {
+    try { localStorage.setItem('tzachi_preview', JSON.stringify(cfg)); } catch (_) { toast('הדפדפן חוסם תצוגה מקדימה'); return; }
+    window.open(location.pathname + '#preview', '_blank');
+  }
+
+  // The coordinator decides what the form asks: hide built-in questions, add their own.
+  function editForm() {
+    const cfg = JSON.parse(JSON.stringify(st.d.form || DEFAULT_FORM));
+    cfg.builtins = { ...DEFAULT_FORM.builtins, ...cfg.builtins }; cfg.questions = cfg.questions || [];
+    const BUILT = { location: 'איפה את/ה עכשיו', shelter: 'מיגון', household: 'כמה נפשות בבית', wellbeing: 'איך את/ה מרגיש/ה', help: 'צריכים משהו' };
+    const TYPES = { yesno: 'כן / לא', choice: 'בחירה מרשימה', text: 'תשובה חופשית' };
+    openSheet({ title: 'עריכת הטופס', left: 'תצוגה', right: 'שמירה', html: '<div id="fe"></div>', onMount(s) {
+      const box = s.el.querySelector('#fe');
+      const draw = () => {
+        box.innerHTML = `<div class="group-title">שאלות קבועות</div><div class="form-group">${Object.entries(BUILT).map(([k, l]) =>
+            `<label class="form-row toggle-row"><span>${l}</span><input type="checkbox" data-b="${k}" ${cfg.builtins[k] ? 'checked' : ''}></label>`).join('')}</div>
+          <div class="group-title">שאלות שהוספת</div><div class="group">${cfg.questions.map((q, i) => `<div class="cell" style="cursor:default"><span class="grow"><span class="t">${esc(q.label)}${q.required ? ' *' : ''}</span>
+            <span class="s" style="display:block">${TYPES[q.type]}${q.type === 'choice' ? ': ' + esc((q.options || []).join(', ')) : ''}</span></span><button class="btn sm danger" data-del="${i}">מחיקה</button></div>`).join('') || '<div class="empty">עוד לא הוספת שאלות</div>'}</div>
+          <div class="group-title">שאלה חדשה</div><div class="form-group">
+            <div class="form-row"><label for="nq">השאלה</label><input id="nq" maxlength="120" placeholder="למשל: יש בבית חיית מחמד?"></div>
+            <div class="form-row"><label for="nt">סוג תשובה</label><select id="nt">${Object.entries(TYPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
+            <div class="form-row" id="nor" style="display:none"><label for="no">אפשרויות</label><input id="no" maxlength="200" placeholder="מופרדות בפסיק"></div>
+            <label class="form-row toggle-row"><span>חובה לענות</span><input type="checkbox" id="nr"></label></div>
+          <div style="margin-top:12px"><button class="btn block" id="addq">הוספת השאלה</button></div>`;
+        box.querySelectorAll('[data-b]').forEach(c => c.onchange = () => { cfg.builtins[c.dataset.b] = c.checked; });
+        box.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { cfg.questions.splice(+b.dataset.del, 1); draw(); });
+        const nt = box.querySelector('#nt'); nt.onchange = () => { box.querySelector('#nor').style.display = nt.value === 'choice' ? '' : 'none'; };
+        box.querySelector('#addq').onclick = () => {
+          const label = box.querySelector('#nq').value.trim(), options = box.querySelector('#no').value.split(',').map(x => x.trim()).filter(Boolean);
+          if (!label) { toast('צריך לכתוב את השאלה'); return; }
+          if (nt.value === 'choice' && options.length < 2) { toast('צריך לפחות שתי אפשרויות'); return; }
+          if (cfg.questions.length >= 15) { toast('אפשר עד 15 שאלות'); return; }
+          cfg.questions.push({ id: 'q' + Date.now().toString(36), label, type: nt.value, ...(nt.value === 'choice' ? { options } : {}), required: box.querySelector('#nr').checked });
+          draw();
+        };
+      };
+      draw();
+      s.el.querySelector('[data-left]').onclick = () => previewForm(cfg);
+      s.el.querySelector('[data-right]').onclick = async () => { if (await act(() => rpc('staff_form_save', { p_token: tok, p_config: cfg }), 'הטופס נשמר')) { s.close(); if (st.tab === 'rounds') viewRounds(); } };
+    } });
   }
 
   async function viewTeam() {
@@ -524,25 +627,26 @@ function staffView(tok) {
         ${r ? `<button data-rep="ok">${svg('check')}בסדר</button><button data-rep="help">${svg('help')}צריך עזרה</button><button data-rep="unr">${svg('moon')}לא זמין</button>` : ''}</div>
       <div class="group-title">פרטים</div><div class="group kv">
         ${row('טלפון', p.phone ? `<a href="tel:${esc(p.phone)}" style="direction:ltr;unicode-bidi:isolate;color:var(--tint);text-decoration:none">${esc(p.phone)}</a>` : 'אין')}
-        ${row('שיבוץ', esc(shelterName(p.shelter_id)))}${row('משק בית', mates.map(m => esc(fullName(m))).join(', '))}${row('הערה', esc(p.note))}</div>
+        ${row('שיבוץ', esc(shelterName(p.shelter_id)))}${row('ממ״ד', p.has_mamad === true ? 'יש בבית' : p.has_mamad === false ? 'אין, משתמשים במקלט' : 'לא ידוע')}${row('משק בית', mates.map(m => esc(fullName(m))).join(', '))}${row('הערה', esc(p.note))}</div>
       ${a ? `<div class="group-title">התשובה בסבב · ${esc(time(a.submitted_at))}</div><div class="group kv">
         ${row('דיווח', a.reported_by ? esc(a.reported_by) : 'התושב/ת')}${row('מיקום', a.location ? LOC[a.location] + (a.location_other ? ' · ' + esc(a.location_other) : '') : '')}
         ${row('מיגון', a.shelter_status ? SHEL[a.shelter_status] : '')}${row('הרגשה', a.wellbeing ? MOODS[a.wellbeing - 1].join(' ') : '')}
-        ${row('נפשות', a.household_count != null ? String(a.household_count) : '')}${row('עזרה', a.help_type !== 'none' ? HELP[a.help_type] + (a.help_note ? ' · ' + esc(a.help_note) : '') : '')}</div>` : ''}`,
+        ${row('נפשות', a.household_count != null ? String(a.household_count) : '')}${row('עזרה', a.help_type !== 'none' ? HELP[a.help_type] + (a.help_note ? ' · ' + esc(a.help_note) : '') : '')}
+        ${((st.d.form || {}).questions || []).map(q => row(esc(q.label), esc(a.extra?.[q.id]))).join('')}</div>` : ''}`,
       onMount(s) {
         s.el.querySelector('[data-right]')?.addEventListener('click', () => { s.close(); editPerson(p); });
         s.el.querySelector('[data-wa]')?.addEventListener('click', () => sendLink(p));
         const rep = { ok: { location: 'kibbutz', help_type: 'none' }, unr: { outcome: 'unreachable' } };
         s.el.querySelectorAll('[data-rep]').forEach(b => b.onclick = async () => {
           let payload = rep[b.dataset.rep];
-          if (b.dataset.rep === 'help') { const n = await ask({ title: 'צריך עזרה', label: 'במה?', confirmText: 'שמירה' }); if (n === null) return; payload = { location: 'kibbutz', help_type: 'other', help_note: n }; }
+          if (b.dataset.rep === 'help') { const n = await ask({ title: 'צריך עזרה', label: 'במה?', confirmText: 'שמירה', required: true }); if (n === null) return; payload = { location: 'kibbutz', help_type: 'other', help_note: n }; }
           if (await act(() => rpc('staff_report', { p_token: tok, p_person: p.id, p: payload }), 'נשמר')) s.close();
         });
       } });
   }
 
-  function editPerson(p) {
-    const isNew = !p; p = p || { id: null, first_name: '', last_name: '', phone: '', note: '', shelter_id: '', household_id: null };
+  function editPerson(p, preset = {}) {
+    const isNew = !p; p = p || { id: null, first_name: '', last_name: '', phone: '', note: '', shelter_id: '', household_id: null, has_mamad: null, ...preset };
     const mates = p.household_id ? st.d.people.filter(o => o.household_id === p.household_id && o.id !== p.id) : [];
     const others = st.d.people.filter(o => o.id !== p.id).sort((a, b) => (a.last_name + a.first_name).localeCompare(b.last_name + b.first_name, 'he'));
     openSheet({ title: isNew ? 'תושב/ת חדש/ה' : 'עריכה', left: 'ביטול', right: 'שמירה', html: `
@@ -553,13 +657,15 @@ function staffView(tok) {
       <div class="group-title">שיבוץ</div><div class="form-group">
         <div class="form-row"><label for="pf4">מקלט / שכונה</label><select id="pf4"><option value="">ללא שיבוץ</option>${st.d.shelters.map(s => `<option value="${s.id}" ${p.shelter_id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>
         <div class="form-row"><label for="pf5">משק בית עם</label><select id="pf5"><option value="">לבד</option>${others.map(o => `<option value="${o.id}" ${mates[0]?.id === o.id ? 'selected' : ''}>${esc(o.last_name + ' ' + o.first_name)}</option>`).join('')}</select></div></div>
+      <div class="form-group" style="margin-top:10px"><div class="form-row"><label for="pf7m">ממ״ד בבית</label><select id="pf7m">
+        <option value="" ${p.has_mamad == null ? 'selected' : ''}>לא ידוע</option><option value="true" ${p.has_mamad === true ? 'selected' : ''}>יש</option><option value="false" ${p.has_mamad === false ? 'selected' : ''}>אין</option></select></div></div>
       <div class="group-title">הערה</div><div class="form-group"><div class="form-row"><textarea id="pf6" maxlength="500" aria-label="הערה">${esc(p.note)}</textarea></div></div>
       ${isNew ? '' : '<div style="margin-top:22px"><button class="btn block danger" id="arch">הסרה מהרשימה</button></div>'}`,
       onMount(s) {
         const v = id => s.el.querySelector('#' + id);
         s.el.querySelector('[data-left]').onclick = () => s.close();
         const save = async archived => {
-          const body = { id: p.id, first_name: v('pf1').value, last_name: v('pf2').value, phone: v('pf3').value, shelter_id: v('pf4').value, household_with: v('pf5').value, note: v('pf6').value, archived };
+          const body = { id: p.id, first_name: v('pf1').value, last_name: v('pf2').value, phone: v('pf3').value, shelter_id: v('pf4').value, household_with: v('pf5').value, note: v('pf6').value, has_mamad: v('pf7m').value, archived };
           if (!body.first_name.trim()) { toast('צריך שם פרטי'); v('pf1').focus(); return; }
           if (await act(() => rpc('staff_person_save', { p_token: tok, p: body }), archived ? 'הוסר מהרשימה' : 'נשמר')) s.close();
         };
@@ -576,6 +682,7 @@ function staffView(tok) {
 (function start() {
   const h = new URLSearchParams(location.hash.slice(1));
   if (h.get('r')) return residentView(h.get('r'));
+  if (location.hash === '#preview') { let cfg = null; try { cfg = JSON.parse(localStorage.getItem('tzachi_preview')); } catch (_) { /* no preview data */ } return residentView(null, cfg || DEFAULT_FORM); }
   if (h.get('s')) { try { localStorage.setItem(STAFF_KEY, h.get('s')); } catch (_) { /* private mode: token lives in the URL only */ } history.replaceState(null, '', location.pathname); return staffView(h.get('s')); }
   let saved = null; try { saved = localStorage.getItem(STAFF_KEY); } catch (_) { /* storage blocked */ }
   if (saved) return staffView(saved);
