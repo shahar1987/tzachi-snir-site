@@ -334,3 +334,43 @@ textarea.field { min-height: 96px; resize: vertical; }
   .issue span { font-size: .8125rem; line-height: 1.2; }
   .issue .chev { display: none; }
 }
+
+/* ---- design review fixes ---- */
+:root { --red-text: #d70015; --orange-text: #c93400; --indigo-text: #3634a3; --teal-text: #007d91; --green-text: #248a3d; --nest: var(--bg); }
+@media (prefers-color-scheme: dark) { :root { --red-text: #ff6961; --orange-text: #ffb340; --indigo-text: #7d7aff; --teal-text: #5de6ff; --green-text: #30db5b; --nest: #2c2c2e; } }
+.b-no_answer { color: var(--orange-text); } .b-needs_help { color: var(--red-text); } .b-unreachable { color: var(--indigo-text); } .b-away { color: var(--teal-text); } .b-safe { color: var(--green-text); }
+.panel h3 { font-size: .875rem; color: var(--label); }
+.p-kpis .stat[data-s="needs_help"]:not(.zero) { background: color-mix(in srgb, var(--red) 14%, var(--bg-2)); }
+.p-kpis .stat[data-s="needs_help"]:not(.zero) b { color: var(--red-text); }
+.p-kpis .stat[data-s="unreachable"]:not(.zero) b { color: var(--indigo-text); }
+.p-kpis .stat.zero b { color: var(--label-3); }
+.p-round .btn { white-space: nowrap; }
+.p-queue .case { background: var(--nest); border-inline-start: 4px solid var(--red); }
+.p-queue .case .top { cursor: pointer; border-radius: var(--r-s); }
+.p-queue .case .row-actions { flex-wrap: nowrap; }
+.p-queue .cell .badge { display: none; }
+.btn.call { width: 36px; padding: 0; justify-content: center; margin-inline-start: auto; border-radius: 50%; color: var(--go); }
+.btn.call svg { width: 18px; height: 18px; }
+.srow .alert { order: -1; }
+.dash.idle .p-queue { display: none; }
+@media (pointer: coarse) { .btn.sm { min-height: 44px; } .btn.call { width: 44px; } .issue { min-height: 44px; } }
+@media (max-width: 899px) { .issue { background: var(--nest); } }
+@media (min-width: 900px) {
+  .content:has(.dash) .large-title h1 { font-size: 1.5rem; }
+  .content:has(.dash) .large-title { margin-top: -30px; padding-bottom: 6px; }
+  .p-kpis .stat b { font-size: 2.25rem; }
+  .p-kpis .stat span:last-child { font-size: .875rem; }
+  .p-shelters { overflow-y: auto; }
+  .p-shelters .scroll { flex: 0 0 auto; max-height: 45%; }
+  .dash.idle { grid-template-columns: 1fr 1fr; }
+  .dash.idle .p-kpis { grid-column: 2; }
+}
+/* Tablets and small laptops: icon rail instead of the 260px sidebar, so the 3 columns fit. */
+@media (min-width: 900px) and (max-width: 1199px) {
+  .shell { grid-template-columns: 72px 1fr; }
+  .tabbar { padding: 56px 8px 12px; }
+  .tabbar .brand { display: none; }
+  .tabbar button { justify-content: center; padding: 10px 0; position: relative; }
+  .tabbar button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .tabbar button svg { width: 24px; height: 24px; }
+}

@@ -374,7 +374,7 @@ function staffView(tok) {
 
   const personCell = (p, i = 0) => `<button class="cell" data-p="${p.id}" style="--i:${Math.min(i, 14)}">
       <span class="avatar ${p.status ? 'av-' + p.status : ''}" aria-hidden="true">${esc(initials(p))}</span>
-      <span class="grow"><span class="t">${esc(fullName(p))}</span><span class="s" style="display:block">${esc(shelterName(p.shelter_id))}${p.answer?.help_note ? ' · ' + esc(p.answer.help_note) : ''}${p.answer?.reported_by ? ' · דיווח: ' + esc(p.answer.reported_by) : ''}</span></span>
+      <span class="grow"><span class="t">${esc(fullName(p))}</span><span class="s" style="display:block">${p.answer?.help_note ? esc(p.answer.help_note) + ' · ' : ''}${esc(shelterName(p.shelter_id))}${p.answer?.reported_by ? ' · דיווח: ' + esc(p.answer.reported_by) : ''}</span></span>
       ${badge(p.status)}${chev}</button>`;
   const bindPeople = el => el.querySelectorAll('[data-p]').forEach(b => b.onclick = () => openPerson(b.dataset.p));
 
@@ -382,7 +382,7 @@ function staffView(tok) {
     const r = 34, len = 2 * Math.PI * r, off = len * (1 - (total ? done / total : 0));
     return `<div class="ring" role="img" aria-label="${done} מתוך ${total} ענו"><svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="${r}" fill="none" stroke-width="9"/>
       <circle class="bar" cx="42" cy="42" r="${r}" fill="none" stroke-width="9" stroke-dasharray="${len}" stroke-dashoffset="${len}" data-off="${off}"/></svg>
-      <div class="num"><div><b>${total ? Math.round(done / total * 100) : 0}%</b><br><span>ענו</span></div></div></div>`;
+      <div class="num"><div><b>${total ? Math.round(done / total * 100) : 0}%</b><br><span>${done}/${total}</span></div></div></div>`;
   }
   const animateRings = el => requestAnimationFrame(() => requestAnimationFrame(() => el.querySelectorAll('.ring .bar').forEach(b => b.style.strokeDashoffset = b.dataset.off)));
 
@@ -394,60 +394,60 @@ function staffView(tok) {
     // Everything that needs a human, worst first; registry gaps matter even with no round open.
     const issues = [
       r && ['difficulty_reaching', 'מתקשים להגיע למקלט', 'red', P.filter(p => p.answer?.shelter_status === 'difficulty_reaching')],
-      r && ['low_mood', 'מרגישים קשה', 'red', P.filter(p => p.answer?.wellbeing && p.answer.wellbeing <= 2)],
-      r && ['unreachable', 'לא זמינים', 'indigo', P.filter(p => p.status === 'unreachable')],
-      r && ['no_answer', 'עוד לא ענו', 'orange', P.filter(p => p.status === 'no_answer')],
-      ['no_shelter', 'בלי שיבוץ למקלט', 'orange', P.filter(p => !p.shelter_id)],
-      ['no_phone', 'בלי טלפון', 'orange', P.filter(p => !p.phone)],
+      r && ['low_mood', 'מרגישים קשה', 'orange', P.filter(p => p.answer?.wellbeing && p.answer.wellbeing <= 2)],
+      ['no_shelter', 'בלי שיבוץ למקלט', 'gray', P.filter(p => !p.shelter_id)],
+      ['no_phone', 'בלי טלפון', 'gray', P.filter(p => !p.phone)],
       ['no_link', 'בלי קישור אישי', 'gray', P.filter(p => !p.has_link)],
       ['mamad_unknown', 'ממ״ד לא ידוע', 'gray', P.filter(p => p.has_mamad == null)],
     ].filter(x => x && x[3].length);
     const bars = (rows, total) => rows.map(([label, n, color]) => `<div class="mb"><span>${label}</span><i><b style="width:${total ? Math.round(n / total * 100) : 0}%;background:var(--${color})"></b></i><em>${n}</em></div>`).join('');
     const queue = P.filter(p => st.filter ? p.status === st.filter : ['needs_help', 'unreachable'].includes(p.status))
-      .sort((a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status));
+      .sort((a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status))
+      .filter(p => st.filter || !d.cases.some(cs => cs.person_id === p.id)); // a help card already shows them
     const sh = d.shelters.filter(x => x.kind === 'shelter').map(x => { const ppl = P.filter(p => p.shelter_id === x.id), k = counts(ppl); return { x, ppl, k, alert: k.needs_help + k.unreachable }; })
       .sort((a, b) => b.alert - a.alert || (r ? b.k.no_answer - a.k.no_answer : 0));
     const locs = r ? Object.entries(LOC).map(([k, v]) => [v, P.filter(p => p.answer?.location === k).length, k === 'kibbutz' ? 'green' : 'teal']) : [];
-    const moods = r ? [5, 4, 3, 2, 1].map(w => [['', 'קשה מאוד', 'קשה', 'מתמודד/ת', 'בסדר', 'טוב'][w], P.filter(p => p.answer?.wellbeing === w).length, w <= 2 ? 'red' : w === 3 ? 'orange' : 'green']) : [];
+    const moods = r ? [5, 4, 3, 2, 1].map(w => [['', 'קשה מאוד', 'קשה', 'מתמודד/ת', 'בסדר', 'טוב'][w], P.filter(p => p.answer?.wellbeing === w).length, w <= 2 ? 'orange' : w === 3 ? 'gray' : 'green']) : [];
     const answeredMood = moods.reduce((t, m) => t + m[1], 0);
 
-    let html = `<div class="dash ${stag}">
+    let html = `<div class="dash ${stag} ${r ? '' : 'idle'}">
       <section class="panel p-round" style="--i:0">${r ? ring(answered, P.length) : ''}<div class="grow">
-        ${r ? `<h2><span class="live" aria-hidden="true"></span>${esc(r.title)}</h2><div class="muted">נפתח ${esc(time(r.opened_at))} · ${answered} מתוך ${P.length} ענו</div>`
+        ${r ? `<h2><span class="live" aria-hidden="true"></span>${esc(r.title)}</h2><div class="muted">נפתח ${esc(time(r.opened_at))}</div>`
             : `<h2>אין סבב פעיל</h2><div class="muted">${P.length} תושבים · ${d.shelters.length} מקלטים ושכונות</div>`}</div>
         ${can() ? `<div class="row-actions">${r ? `<button class="btn sm fill" id="sendall">שליחת קישורים</button><button class="btn sm danger" id="close">סגירת הסבב</button>`
             : `<button class="btn fill" id="openr">פתיחת סבב</button>`}</div>` : ''}</section>
-      ${r ? `<section class="p-kpis" style="--i:1">${STATUS_ORDER.map(k => `<button class="stat" data-s="${k}" aria-pressed="${st.filter === k}">
+      ${r ? `<section class="p-kpis" style="--i:1">${STATUS_ORDER.map(k => `<button class="stat${c[k] ? '' : ' zero'}" data-s="${k}" aria-pressed="${st.filter === k}">
           <span class="dot" style="background:${STAT_COLOR[k]}">${svg(STAT_ICON[k])}</span><b>${c[k]}</b><span>${STATUS[k]}</span></button>`).join('')}</section>`
         : `<section class="p-kpis idle" style="--i:1">${[['תושבים', P.length], ['יש ממ״ד', P.filter(p => p.has_mamad === true).length], ['משובצים למקלט', P.filter(p => p.shelter_id).length], ['עם קישור', P.filter(p => p.has_link).length]]
           .map(([l, n]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join('')}</section>`}
 
       <section class="panel p-issues" style="--i:2"><h3>בעיות לטיפול</h3>
         <div class="issues">${issues.map(([k, l, col, ppl]) => `<button class="issue" data-issue="${k}"><i style="background:var(--${col})"></i><span>${l}</span><b>${ppl.length}</b>${chev}</button>`).join('') || '<div class="empty">אין בעיות פתוחות</div>'}</div>
-        <h3>מיגון</h3>${bars([['יש ממ״ד', P.filter(p => kind(p) === 'protected_room').length, 'green'], ['אין ממ״ד', P.filter(p => kind(p) === 'going_to_shelter').length, 'teal'],
-          ...(r ? [['מתקשים להגיע', P.filter(p => kind(p) === 'difficulty_reaching').length, 'red']] : []), ['לא ידוע', P.filter(p => kind(p) === 'none').length, 'gray']], P.length)}
-        ${r ? `<details class="more" ${matchMedia('(min-width: 900px)').matches ? 'open' : ''}><summary>איפה התושבים ואיך מרגישים</summary>
-          <h3>איפה התושבים</h3>${bars(locs, answered)}<h3>איך מרגישים</h3>${bars(moods, answeredMood)}</details>` : ''}</section>
+</section>
 
       <section class="panel p-queue" style="--i:3"><h3>${st.filter ? STATUS[st.filter] : 'דורשים טיפול עכשיו'} · ${queue.length + (st.filter ? 0 : d.cases.length)}</h3><div class="scroll">
         ${st.filter ? '' : d.cases.map(cs => { const p = byId(cs.person_id); return `<div class="case">
-          <div class="top"><span class="avatar av-needs_help" aria-hidden="true">${esc(p ? initials(p) : '')}</span>
+          <div class="top" data-p="${cs.person_id}" role="button" tabindex="0"><span class="avatar av-needs_help" aria-hidden="true">${esc(p ? initials(p) : '')}</span>
             <span class="grow"><b>${esc(p ? fullName(p) : '')}</b><span class="muted">עזרה ${HELP[cs.help_type]} · ${esc(time(cs.opened_at))}</span></span>
             ${cs.status === 'assigned' ? `<span class="badge b-away">${esc(cs.assigned_to)}</span>` : '<span class="badge b-needs_help">חדש</span>'}</div>
           ${cs.note ? `<p>${esc(cs.note)}</p>` : ''}
           <div class="row-actions">${cs.status === 'open' ? `<button class="btn sm" data-assign="${cs.id}">אני מטפל/ת</button>` : ''}
-            <button class="btn sm fill" data-resolve="${cs.id}">סיום טיפול</button>${p?.phone ? `<a class="btn sm" href="tel:${esc(p.phone)}">התקשרות</a>` : ''}
-            <button class="btn sm" data-p="${cs.person_id}">כרטיס</button></div></div>`; }).join('')}
+            <button class="btn sm fill" data-resolve="${cs.id}">סיום טיפול</button>${p?.phone ? `<a class="btn sm call" href="tel:${esc(p.phone)}" aria-label="התקשרות ל${esc(fullName(p))}">${svg('phone')}</a>` : ''}</div></div>`; }).join('')}
         ${queue.length ? `<div class="group">${queue.map(personCell).join('')}</div>` : (st.filter || d.cases.length ? '' : `<div class="empty calm">${r ? 'אין כרגע מי שצריך טיפול' : 'כשייפתח סבב, כאן יופיעו מי שצריכים טיפול'}</div>`)}</div></section>
 
       <section class="panel p-shelters" style="--i:4"><h3>מקלטים · ${sh.length}</h3><div class="scroll">
-        ${sh.map(({ x, ppl, k, alert }) => `<button class="srow" data-sh="${esc(x.id)}"><span class="grow"><span class="t">${esc(x.name)}</span>
-            <span class="bar-stack">${r ? ['safe', 'away', 'no_answer', 'unreachable', 'needs_help'].map(s2 => k[s2] ? `<i class="i-${s2}" style="flex-grow:${k[s2]}"></i>` : '').join('') : `<i class="i-safe" style="flex-grow:1"></i>`}</span></span>
-          <span class="n">${r ? `${ppl.length - k.no_answer}<small>/${ppl.length}</small>` : ppl.length}</span>${alert ? `<span class="alert">${alert}</span>` : ''}</button>`).join('')}</div></section>
+        ${sh.map(({ x, ppl, k, alert }) => `<button class="srow" data-sh="${esc(x.id)}" aria-label="${esc(x.name)}, ${r ? `${ppl.length - k.no_answer} מתוך ${ppl.length} ענו, ${alert} דורשים טיפול` : `${ppl.length} תושבים`}"><span class="grow"><span class="t">${esc(x.name)}</span>
+            <span class="bar-stack">${r ? ['safe', 'away', 'no_answer', 'unreachable', 'needs_help'].map(s2 => k[s2] ? `<i class="i-${s2}" style="flex-grow:${k[s2]}"></i>` : '').join('') : `<i style="flex-grow:1;background:var(--fill-2)"></i>`}</span></span>
+          <span class="n">${r ? `${ppl.length - k.no_answer}<small>/${ppl.length}</small>` : ppl.length}</span>${alert ? `<span class="alert" title="דורשים טיפול">${alert}</span>` : '<span class="alert" aria-hidden="true" style="visibility:hidden"></span>'}</button>`).join('')}</div>
+        <h3>מיגון</h3>${bars([['יש ממ״ד', P.filter(p => kind(p) === 'protected_room').length, 'green'], ['אין ממ״ד', P.filter(p => kind(p) === 'going_to_shelter').length, 'gray'],
+          ...(r ? [['מתקשים להגיע', P.filter(p => kind(p) === 'difficulty_reaching').length, 'red']] : []), ['לא ידוע', P.filter(p => kind(p) === 'none').length, 'fill-2']], P.length)}
+        ${r ? `<details class="more" ${matchMedia('(min-width: 900px)').matches ? 'open' : ''}><summary>איפה התושבים ואיך מרגישים</summary>
+          <h3>איפה התושבים</h3>${bars(locs, answered)}<h3>איך מרגישים</h3>${bars(moods, answeredMood)}</details>` : ''}</section>
     </div>`;
     el.innerHTML = html;
     animateRings(el); bindPeople(el);
     el.querySelectorAll('button.stat').forEach(b => b.onclick = () => { st.filter = st.filter === b.dataset.s ? null : b.dataset.s; page(false); });
+    el.querySelectorAll('.case .top').forEach(t => t.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t.click(); } });
     el.querySelectorAll('[data-issue]').forEach(b => b.onclick = () => { const x = issues.find(i => i[0] === b.dataset.issue); openGroup(x[1], x[3]); });
     el.querySelectorAll('[data-sh]').forEach(b => b.onclick = () => { const x = sh.find(i => i.x.id === b.dataset.sh); openGroup(x.x.name, x.ppl, x.x.id); });
     el.querySelectorAll('[data-assign]').forEach(b => b.onclick = () => act(() => rpc('staff_case_update', { p_token: tok, p_case: b.dataset.assign, p_status: 'assigned', p_note: null }), 'סומן שאת/ה מטפל/ת'));
