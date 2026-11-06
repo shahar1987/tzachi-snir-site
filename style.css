@@ -257,3 +257,7 @@ textarea.field { min-height: 96px; resize: vertical; }
   :root { --label-2: var(--label); --sep: var(--label-2); }
   .group, .tile, .stat, .choice, .case { outline: 1px solid var(--label-3); }
 }
+.me.link { background: none; border: 0; font: inherit; font-size: .8125rem; color: var(--tint); cursor: pointer; padding: 0 0 6px; }
+.login { max-width: 340px; margin: 32px auto 0; text-align: start; }
+.login .cta { width: 100%; margin-top: 6px; }
+.login .err:empty { display: none; }

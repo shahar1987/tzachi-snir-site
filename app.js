@@ -14,7 +14,8 @@ const ROLES = { admin: 'מנהל', coordinator: 'רכז', shelter_manager: 'אח
 const ERRORS = {
   not_authorized: 'הקישור לא תקף. בקשו קישור חדש מצוות צח״י.', no_open_round: 'אין כרגע סבב פעיל.',
   forbidden: 'אין הרשאה לפעולה הזו.', note_required: 'צריך לכתוב מה נעשה.', round_already_open: 'כבר יש סבב פתוח.',
-  cannot_revoke_self: 'אי אפשר להסיר את עצמך.', bad_answer: 'אחת התשובות לא תקינה.', bad_form: 'הטופס לא תקין.'
+  cannot_revoke_self: 'אי אפשר להסיר את עצמך.', bad_answer: 'אחת התשובות לא תקינה.', bad_form: 'הטופס לא תקין.',
+  weak_password: 'הסיסמה קצרה מדי: לפחות 8 תווים.', password_taken: 'הסיסמה תפוסה, צריך לבחור אחרת.', too_many_attempts: 'יותר מדי ניסיונות. לנסות שוב בעוד רבע שעה.'
 };
 
 const ICON = {
@@ -350,8 +351,9 @@ function staffView(tok) {
     nav.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { if (st.tab !== b.dataset.t) { st.tab = b.dataset.t; scrollTo(0, 0); page(true); } });
     const c = document.getElementById('content');
     const y = scrollY;
-    c.innerHTML = `<div class="${animate ? 'page' : ''}"><div class="large-title"><h1 id="lt">${TITLES[st.tab]}</h1><span class="me">${esc(st.d.me.name)} · ${ROLES[st.d.me.role]}</span></div><div id="tab"></div></div>`;
+    c.innerHTML = `<div class="${animate ? 'page' : ''}"><div class="large-title"><h1 id="lt">${TITLES[st.tab]}</h1><button class="me link" id="acct">${esc(st.d.me.name)} · ${ROLES[st.d.me.role]}</button></div><div id="tab"></div></div>`;
     $app.querySelector('.nav-bar').textContent = TITLES[st.tab];
+    document.getElementById('acct').onclick = account;
     ({ now: viewNow, map: viewMap, people: viewPeople, rounds: viewRounds, team: viewTeam })[st.tab](animate);
     if (!animate) scrollTo(0, y);
     watchTitle();
@@ -560,15 +562,37 @@ function staffView(tok) {
     } });
   }
 
+  async function setPassword(staffId, name) {
+    const pw = await ask({ title: name ? 'סיסמה ל' + name : 'הסיסמה שלי', label: 'לפחות 8 תווים. איתה נכנסים מכל מכשיר.', confirmText: 'שמירה', required: true });
+    if (pw === null) return false;
+    try { await rpc('staff_set_password', { p_token: tok, p_staff: staffId, p_password: pw }); toast('הסיסמה נשמרה'); return true; }
+    catch (e) { toast(e.message); return false; }
+  }
+  function account() {
+    openSheet({ title: st.d.me.name, html: `<div class="group">
+        <button class="cell" id="mypw"><span class="grow t">הגדרת סיסמה</span></button>
+        <button class="cell" id="out"><span class="grow t" style="color:var(--red)">יציאה מהמכשיר הזה</span></button></div>`,
+      onMount(s) {
+        s.el.querySelector('#mypw').onclick = () => { s.close(); setPassword(null); };
+        s.el.querySelector('#out').onclick = async () => {
+          try { await rpc('staff_logout', { p_token: tok }); } catch (_) { /* logging out locally is what matters */ }
+          try { localStorage.removeItem(STAFF_KEY); } catch (_) { /* storage blocked */ }
+          location.replace(location.pathname);
+        };
+      } });
+  }
+
   async function viewTeam() {
     const el = document.getElementById('tab');
     try {
       const team = await rpc('admin_staff_list', { p_token: tok });
       el.innerHTML = `<div class="group stagger">${team.map((m, i) => `<div class="cell" style="--i:${i};cursor:default"><span class="avatar" aria-hidden="true" style="background:var(--tint)">${esc(m.name[0])}</span>
           <span class="grow"><span class="t">${esc(m.name)}</span><span class="s" style="display:block">${ROLES[m.role]}${m.shelter_id ? ' · ' + esc(shelterName(m.shelter_id)) : ''}</span></span>
-          ${m.name === st.d.me.name ? '' : `<button class="btn sm danger" data-rev="${m.id}">הסרה</button>`}</div>`).join('')}</div>
+          <button class="btn sm" data-pw="${m.id}" data-n="${esc(m.name)}">${m.has_password ? 'שינוי סיסמה' : 'סיסמה'}</button>
+          ${m.me ? '' : `<button class="btn sm danger" data-rev="${m.id}">הסרה</button>`}</div>`).join('')}</div>
         <div style="margin-top:16px"><button class="btn fill block" id="addstaff">הוספת איש צוות</button></div>`;
       document.getElementById('addstaff').onclick = addStaff;
+      el.querySelectorAll('[data-pw]').forEach(b => b.onclick = async () => { if (await setPassword(b.dataset.pw, b.dataset.n)) viewTeam(); });
       el.querySelectorAll('[data-rev]').forEach(b => b.onclick = async () => {
         if (await ask({ title: 'הסרה מהצוות', label: 'הקישור שלו יפסיק לעבוד מיד.', confirmText: 'הסרה', danger: true, input: false }))
           (await act(() => rpc('admin_staff_revoke', { p_token: tok, p_staff: b.dataset.rev }), 'הוסר')) && viewTeam();
@@ -687,5 +711,20 @@ function staffView(tok) {
   let saved = null; try { saved = localStorage.getItem(STAFF_KEY); } catch (_) { /* storage blocked */ }
   if (saved) return staffView(saved);
   $app.className = 'resident';
-  $app.innerHTML = '<div class="done"><h1>צח״י שניר</h1><p class="sub">הכניסה היא דרך הקישור האישי שקיבלתם.</p></div>';
+  $app.innerHTML = `<div class="done"><h1>צח״י שניר</h1><p class="sub">תושבים: הכניסה היא דרך הקישור האישי שקיבלתם.</p>
+    <form id="login" class="login" novalidate><label class="q" for="pw">כניסת צוות</label>
+      <input class="field" id="pw" type="password" autocomplete="current-password" placeholder="סיסמה" required>
+      <p class="err" id="lerr" role="alert"></p><button class="cta" id="lgo">כניסה</button></form></div>`;
+  document.getElementById('login').onsubmit = async e => {
+    e.preventDefault();
+    const pw = document.getElementById('pw').value, btn = document.getElementById('lgo'), err = document.getElementById('lerr');
+    if (!pw) { err.textContent = 'צריך להקליד סיסמה'; return; }
+    btn.disabled = true; btn.textContent = 'נכנס…'; err.textContent = '';
+    try {
+      const t = await rpc('staff_login', { p_password: pw });
+      if (!t) throw new Error('סיסמה שגויה');
+      try { localStorage.setItem(STAFF_KEY, t); } catch (_) { /* private mode: stays logged in until the tab closes */ }
+      staffView(t);
+    } catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = 'כניסה'; document.getElementById('pw').select(); }
+  };
 })();
